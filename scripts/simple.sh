@@ -6,22 +6,35 @@
 #trap 'exec 2>&4 1>&3' 0 1 2 3
 #exec 1>log.out 2>&1
 
-{ # the entire script stdout and error will be displayed and redirected to log.txt
+{
+# the entire script stdout and error will be displayed and redirected to log.txt
 #reading variables
 source ./scripts/simple_variables.sh
 
-#install programs bwa and samtools
-cd programs/bwa-0.7.12
-make clean 
-make
+# Check if software is already installed avoid reinstall for repetitive analysis
 
-#new version
-cd ../samtools-1.5
-make clean
-./configure
-make
+# Check if bwa is installed
+if ! command -v ./programs/bwa-0.7.12/bwa &> /dev/null; then
+  echo "bwa not found, installing..."
+  cd programs/bwa-0.7.12
+  make clean
+  make
+  cd ../../
+else
+  echo "bwa is already installed."
+fi
 
-cd ../../
+# Check if samtools is installed
+if ! command -v ./programs/samtools-1.5/samtools &> /dev/null; then
+  echo "samtools not found, installing..."
+  cd programs/samtools-1.5
+  make clean
+  ./configure
+  make
+  cd ../../
+else
+  echo "samtools is already installed."
+fi
 
 #downloading & creating fasta file
 fasta_link=`awk -v var="$my_species" 'match($1, var) {print $2}' ./scripts/data_base.txt`
@@ -55,29 +68,52 @@ fi
 #snpEff "link"
 snpEff_link=`awk -v var="$my_species" 'match($1, var) {print $4}' ./scripts/data_base.txt`
 
-
-#reference input files that are necessary to run the prograns
+#reference input files that are necessary to run the programs
 knownsnps=./refs/$my_species.vcf
 #ftp://ftp.ensemblgenomes.org/pub/plants/release-31/vcf/arabidopsis_thaliana/arabidopsis_thaliana.vcf.gz
 snpEffDB=$snpEff_link #paste the snpEff annotated genome name
 
 ####creating reference files####
-#creating .fai file
-programs/samtools-1.5/samtools faidx $fa
-#creating bwa index files
-programs/bwa-0.7.12/bwa index -p $my_species.chrs.fa -a is $fa
-mv $my_species.chrs.* refs/
-
-#generating dict file for GATK
-$java -Xmx2g -jar programs/picard.jar CreateSequenceDictionary R=$fa O=refs/$my_species.chrs.dict
-
-
-#making sure that all ref files where loaded and/or created; this is a good control and id the output is "something went wrong", it is usually picard failing due to a problem with java
-a=`ls -l refs/ | wc -l`
-if [ $a = 13 ]; then
-	echo "$(tput setaf 2)refs loaded properly $(tput setaf 7)"
+# Check if .fai file exists
+if [ ! -f ${fa}.fai ]; then
+  #creating .fai file
+  programs/samtools-1.5/samtools faidx $fa
 else
-	echo "$(tput setaf 1)something went wrong $(tput setaf 7)"
+  echo ".fai file already exists."
+fi
+
+# Check if BWA index files exist
+if ! ls refs/$my_species.chrs.* 1> /dev/null 2>&1; then
+  #creating bwa index files
+  programs/bwa-0.7.12/bwa index -p $my_species.chrs.fa -a is $fa
+  mv $my_species.chrs.* refs/
+else
+  echo "BWA index files already exist."
+fi
+
+# Check if GATK dictionary file exists
+if [ ! -f refs/$my_species.chrs.dict ]; then
+  #generating dict file for GATK
+  $java -Xmx2g -jar programs/picard.jar CreateSequenceDictionary R=$fa O=refs/$my_species.chrs.dict
+else
+  echo "GATK dictionary file already exists."
+fi
+
+#making sure that all ref files were loaded and/or created; this is a good control and if the output is "something went wrong", it is usually picard failing due to a problem with java
+expected_files=( "$my_species.chrs.fa.fai" "$my_species.chrs.fa.bwt" "$my_species.chrs.fa.pac" "$my_species.chrs.fa.ann" "$my_species.chrs.fa.amb" "$my_species.chrs.fa.sa" "$my_species.chrs.dict" )
+all_files_exist=true
+
+for file in "${expected_files[@]}"; do
+  if [ ! -f "refs/$file" ]; then
+    echo "$(tput setaf 1)Missing file: refs/$file$(tput setaf 7)"
+    all_files_exist=false
+  fi
+done
+
+if $all_files_exist; then
+  echo "$(tput setaf 2)refs loaded properly$(tput setaf 7)"
+else
+  echo "$(tput setaf 1)something went wrong$(tput setaf 7)"
 fi
 
 
@@ -162,9 +198,11 @@ sort -k1,1 -k2 -n output/$line.cands44.txt > output/$line.candidates.txt
 
 ####################################################################################################################################################
 ####################################################################################################################################################
-#this command will make it ready to run w/ R to produce Manhatten plot
+#this command will make it ready to run w/ R to produce Manhattan plot
 printf "%s\t" "CHR" "POS" "REF" "ALT" "mut_GT" "mut.ref" "mut.alt" "mut.DP" "mut.GQ" "wt.GT" "wt.ref" "wt.alt" "wt.DP" "wt.GQ" > output/$line.plot.txt; printf "\n" >> output/$line.plot.txt
-awk '$1~/^[0-9X]*$/ && $5~/^[AGCT]/ && $9~/^[AGCT]/ && $0 !~ /NA/ && $2 !~ /\./ && $3 !~ /\./ {gsub(/\,/, "\t"); print}' output/$line.table | awk '$6+$11>0 && $8>3 && $13>3' >> output/$line.plot.txt
+# awk correction David
+awk '$1~/^[0-9X]*$/ && $5~/^[AGCT]/ && $9~/^[AGCT]/ && $0 !~ /NA/ && $2 !~ /\./ && $3 !~ /\./ {gsub(/,/, "\t"); print}' output/$line.table | awk '$6+$11>0 && $8>3 && $13>3' >> output/$line.plot.txt
+
 
 #and finally, just get rid of known snps
 awk 'FNR==NR{a[$1$2$4$5];next};!($1$2$3$4 in a)' $knownsnps output/$line.plot.txt > output/$line.plot.no_known_snps.txt
@@ -193,7 +231,7 @@ awk 'BEGIN{OFS="\t"} NR>1 {split($6,a,"|");split($8,b,":"); split(b[2],c,","); s
 ####################################################################################################################################################
 ####################################################################################################################################################
 
-#JEN added the line argument below
+#JEN added the line argument below to execute the R script
 Rscript ./scripts/analysis3.R $line
 
 #archiving files
@@ -207,6 +245,5 @@ echo "$(tput setaf 1)Simple $(tput setaf 3)is $(tput setaf 4)done"
 #appending the simple.sh and R files to the log file
 cat ./scripts/simple.sh >> ./archive/log.txt
 cat ./scripts/analysis3.R >> ./archive/log.txt
-
 
 
